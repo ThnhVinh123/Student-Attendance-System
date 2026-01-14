@@ -1,0 +1,525 @@
+import datetime
+import random
+import os
+import time
+import csv
+
+# =============================================================================
+# 1. ENTITY CLASSES (DATA MODELS)
+# =============================================================================
+
+class User:
+    def __init__(self, user_id, name, email, password, role):
+        self.user_id = user_id
+        self.name = name
+        self.email = email
+        self.password = password
+        self.role = role
+        self.is_active = True # Soft Delete: True = Active, False = Deactivated
+        
+        # Security: Account Lockout Logic
+        self.failed_login_attempts = 0 
+        self.locked_until = None 
+
+class Student(User):
+    def __init__(self, user_id, name, email, password, student_id, class_id):
+        super().__init__(user_id, name, email, password, "Student")
+        self.student_id = student_id
+        self.class_id = class_id
+
+class Lecturer(User):
+    def __init__(self, user_id, name, email, password, lecturer_id):
+        super().__init__(user_id, name, email, password, "Lecturer")
+        self.lecturer_id = lecturer_id
+        self.assigned_classes = []
+
+class Admin(User):
+    def __init__(self, user_id, name, email, password):
+        super().__init__(user_id, name, email, password, "Admin")
+
+class ClassRoom:
+    def __init__(self, class_id, subject_name, lecturer_id):
+        self.class_id = class_id
+        self.subject_name = subject_name
+        self.lecturer_id = lecturer_id
+        self.enrolled_students = [] 
+
+class Session:
+    def __init__(self, session_id, class_id, date_str, start_time, end_time, room):
+        self.session_id = session_id
+        self.class_id = class_id
+        self.date_str = date_str
+        self.start_time = start_time
+        self.end_time = end_time
+        self.room = room
+        self.pin_code = str(random.randint(100000, 999999))
+        self.is_active = True
+        self.attendance_records = []
+        
+        # Datetime parsing for logic comparisons
+        try:
+            self.start_dt = datetime.datetime.strptime(f"{date_str} {start_time}", "%Y-%m-%d %H:%M")
+            self.end_dt = datetime.datetime.strptime(f"{date_str} {end_time}", "%Y-%m-%d %H:%M")
+        except ValueError:
+            # Fallback to avoid crashes
+            now = datetime.datetime.now()
+            self.start_dt = now
+            self.end_dt = now + datetime.timedelta(minutes=90)
+
+class AttendanceRecord:
+    def __init__(self, student_id, student_name, status, timestamp, override_reason=""):
+        self.student_id = student_id
+        self.student_name = student_name
+        self.status = status # Present, Late, Absent
+        self.timestamp = timestamp
+        self.override_reason = override_reason
+        self.is_overridden = False # Flag to mark manual edits
+
+# =============================================================================
+# 2. MOCK DATABASE
+# =============================================================================
+
+class Database:
+    def __init__(self):
+        self.users = []
+        self.classes = []
+        self.sessions = []
+        self._seed_data()
+
+    def _seed_data(self):
+        # 1. Admin
+        self.users.append(Admin("U00", "System Admin", "admin@uth.edu.vn", "123"))
+        
+        # 2. Lecturer
+        lec = Lecturer("U01", "Tran Thi My Tien", "tien@uth.edu.vn", "123", "GV01")
+        lec.assigned_classes = ["SE101", "NT102"]
+        self.users.append(lec)
+
+        # 3. Classes
+        cls1 = ClassRoom("SE101", "Software Engineering", "GV01")
+        cls1.enrolled_students = ["SV01", "SV02"]
+        cls2 = ClassRoom("NT102", "Computer Networks", "GV01")
+        cls2.enrolled_students = ["SV01"]
+        self.classes.extend([cls1, cls2])
+
+        # 4. Students
+        s1 = Student("U02", "Nguyen Tuan Nghia", "nghia@st.uth.edu.vn", "123", "SV01", "SE101")
+        s2 = Student("U03", "Duong Ba Truong", "truong@st.uth.edu.vn", "123", "SV02", "SE101")
+        self.users.extend([s1, s2])
+
+    def get_student_name(self, student_id):
+        for u in self.users:
+            if isinstance(u, Student) and u.student_id == student_id:
+                return u.name
+        return "Unknown"
+
+# =============================================================================
+# 3. APP CONTROLLER & UI
+# =============================================================================
+
+class App:
+    def __init__(self):
+        self.db = Database()
+        self.current_user = None
+
+    def clear_screen(self):
+        print("\n" * 2)
+
+    def auto_close_sessions(self):
+        """
+        CRITICAL: Checks all active sessions. 
+        If Current Time > End Time -> Close Session -> Mark Absent.
+        Runs continuously before every menu interaction.
+        """
+        now = datetime.datetime.now()
+        
+        for session in self.db.sessions:
+            if session.is_active and now > session.end_dt:
+                session.is_active = False 
+                
+                # Logic: Find missing students and mark as ABSENT
+                cls_info = next((c for c in self.db.classes if c.class_id == session.class_id), None)
+                if not cls_info: continue
+
+                submitted_ids = [r.student_id for r in session.attendance_records]
+                
+                for sid in cls_info.enrolled_students:
+                    if sid not in submitted_ids:
+                        absent_rec = AttendanceRecord(
+                            sid, self.db.get_student_name(sid), 
+                            "Absent", "--", "Auto-marked (Session Expired)"
+                        )
+                        session.attendance_records.append(absent_rec)
+
+    def run(self):
+        while True:
+            self.auto_close_sessions() # Always check before showing menu
+            self.clear_screen()
+            print("==================================================")
+            print("       STUDENT ATTENDANCE SYSTEM (UTH)")
+            print("==================================================")
+            if not self.current_user:
+                print("1. Login")
+                print("0. Exit")
+                print("==================================================")
+                choice = input("> Enter choice: ")
+                if choice == '1': self.login_screen()
+                elif choice == '0': break
+            else:
+                self.route_dashboard()
+
+    # --- [UC-001] LOGIN WITH SECURITY LOCKOUT ---
+    def login_screen(self):
+        print("\n--- LOGIN ---")
+        email = input("Email: ")
+        
+        # Find user
+        user = next((u for u in self.db.users if u.email == email), None)
+        
+        # [UC-005] Check Soft Delete (Inactive users cannot login)
+        if user and not user.is_active:
+            print("> ERROR: This account has been deactivated by Admin."); input("Press Enter..."); return
+
+        # [UC-001 A1] Check Security Lock
+        if user and user.locked_until:
+            if datetime.datetime.now() < user.locked_until:
+                print(f"> ACCOUNT LOCKED until {user.locked_until.strftime('%H:%M:%S')}."); input("Press Enter..."); return
+            else:
+                user.locked_until = None; user.failed_login_attempts = 0 # Unlock
+
+        password = input("Password: ")
+        
+        if user and user.password == password:
+            user.failed_login_attempts = 0 # Reset counter
+            self.current_user = user
+            print(f"\n> Login successful! Welcome {user.name} ({user.role})")
+            input("Press Enter to continue...")
+        else:
+            if user:
+                user.failed_login_attempts += 1
+                print(f"> Incorrect Password ({user.failed_login_attempts}/5).")
+                # Lock after 5 failed attempts
+                if user.failed_login_attempts >= 5:
+                    user.locked_until = datetime.datetime.now() + datetime.timedelta(minutes=15)
+                    print("> WARNING: Account locked for 15 minutes due to multiple failed attempts!")
+            else:
+                print("> Invalid Email or Password.")
+            input("Press Enter...")
+
+    def route_dashboard(self):
+        if self.current_user.role == "Student": self.student_dashboard()
+        elif self.current_user.role == "Lecturer": self.lecturer_dashboard()
+        elif self.current_user.role == "Admin": self.admin_dashboard()
+
+    # -------------------------------------------------------------------------
+    # STUDENT AREA
+    # -------------------------------------------------------------------------
+    def student_dashboard(self):
+        while True:
+            self.auto_close_sessions()
+            self.clear_screen()
+            print(f"--- STUDENT: {self.current_user.name} ---")
+            print("1. Submit Attendance (Enter PIN)")
+            print("2. View History")
+            print("0. Logout")
+            c = input("> Select: ")
+            if c == '1': self.st_submit_attendance()
+            elif c == '2': self.st_view_history()
+            elif c == '0': self.current_user = None; return
+
+    def st_submit_attendance(self):
+        # [UC-002] Submit Attendance
+        print("\n[AVAILABLE SESSIONS]")
+        # Only show Active sessions
+        my_sessions = [s for s in self.db.sessions if s.class_id == self.current_user.class_id and s.is_active]
+        if not my_sessions: print("> No active sessions available."); input("Press Enter..."); return
+
+        for idx, s in enumerate(my_sessions):
+            print(f"{idx+1}. {s.class_id} ({s.start_time}-{s.end_time})")
+
+        try:
+            sel = int(input("\n> Select Session (#): ")) - 1
+            if sel < 0 or sel >= len(my_sessions): return
+            sess = my_sessions[sel]
+
+            now = datetime.datetime.now()
+            # Check: Has session started?
+            if now < sess.start_dt:
+                print(f"> ERROR: Class has not started yet! (Starts at {sess.start_time})"); input("Press Enter..."); return
+
+            # [UC-002 A2] Duplicate Submission Check
+            if any(r.student_id == self.current_user.student_id for r in sess.attendance_records):
+                print("> You have already submitted attendance."); input("Press Enter..."); return
+
+            pin = input("> Enter PIN: ")
+            # [UC-002 A1] Invalid PIN Check
+            if pin != sess.pin_code:
+                print("> Invalid PIN."); input("Press Enter..."); return
+
+            # [UC-002] Status Logic (Late vs Present)
+            # Grace period: 15 minutes from Start Time
+            grace_period = sess.start_dt + datetime.timedelta(minutes=15)
+            status = "Late" if now > grace_period else "Present"
+            
+            sess.attendance_records.append(AttendanceRecord(self.current_user.student_id, self.current_user.name, status, now.strftime("%H:%M:%S")))
+            print(f"> SUCCESS! Status: {status}"); input("Press Enter...")
+        except: pass
+
+    def st_view_history(self):
+        # [UC-002 1.9] View History
+        print("\n[MY ATTENDANCE HISTORY]")
+        print(f"{'Date':<12} {'Class':<8} {'Status'}")
+        for s in self.db.sessions:
+            for r in s.attendance_records:
+                if r.student_id == self.current_user.student_id:
+                    print(f"{s.date_str:<12} {s.class_id:<8} {r.status}")
+        input("Press Enter...")
+
+    # -------------------------------------------------------------------------
+    # LECTURER AREA
+    # -------------------------------------------------------------------------
+    def lecturer_dashboard(self):
+        while True:
+            self.auto_close_sessions()
+            self.clear_screen()
+            print(f"--- LECTURER: {self.current_user.name} ---")
+            print("1. Create Session")
+            print("2. Manage Session (View/Close/Extend)")
+            print("3. Override Attendance")
+            print("4. Reports & Export")
+            print("5. Manual Roll Call")
+            print("0. Logout")
+            c = input("> Select: ")
+            if c == '1': self.lec_create_session()
+            elif c == '2': self.lec_manage_session()
+            elif c == '3': self.lec_override()
+            elif c == '4': self.lec_report()
+            elif c == '5': self.lec_manual_roll_call()
+            elif c == '0': self.current_user = None; return
+
+    def lec_create_session(self):
+        # [UC-003] Create Session
+        print("\n[CREATE SESSION]")
+        for c in self.current_user.assigned_classes: print(f"- {c}")
+        cid = input("> Class ID: ")
+        if cid not in self.current_user.assigned_classes: return
+
+        # [UC-003 A3] Conflict & Past Date Check
+        today = datetime.datetime.now().strftime("%Y-%m-%d")
+        print(f"\nTime Setup (Press Enter for today: {today})")
+        date_in = input("Date (YYYY-MM-DD): ")
+        if not date_in.strip(): date_in = today
+
+        start_in = input("Start Time (HH:MM): ")
+        
+        # Conflict Check Logic
+        try:
+            new_start = datetime.datetime.strptime(f"{date_in} {start_in}", "%Y-%m-%d %H:%M")
+            for s in self.db.sessions:
+                if s.class_id == cid and s.is_active and s.start_dt <= new_start <= s.end_dt:
+                    print("> WARNING: Time conflict with an existing session!"); 
+                    if input("Continue anyway? (y/n): ") != 'y': return
+        except: pass
+
+        # [UC-003 A4] Past Date Warning
+        if new_start.date() < datetime.date.today():
+             if input("> WARNING: You selected a past date. Confirm? (y/n): ") != 'y': return
+
+        end_in = input("End Time (HH:MM): ")
+        room = input("Room: ")
+
+        sid = f"S{len(self.db.sessions)+1}"
+        s = Session(sid, cid, date_in, start_in, end_in, room)
+        self.db.sessions.append(s)
+        print(f"> SESSION CREATED! PIN: {s.pin_code}"); input("Press Enter...")
+
+    def lec_manage_session(self):
+        # [UC-006] Manage Session
+        self.auto_close_sessions()
+        print("\n[MANAGE SESSIONS]")
+        my_s = [s for s in self.db.sessions if s.class_id in self.current_user.assigned_classes]
+        for i, s in enumerate(my_s):
+            stt = "OPEN" if s.is_active else "CLOSED"
+            print(f"{i+1}. {s.class_id} | {s.start_time}-{s.end_time} | Status: {stt}")
+        
+        try:
+            sel = int(input("\n> Select Session (0 to back): ")) - 1
+            if sel < 0: return
+            target = my_s[sel]
+            
+            print("1. Close Session Now")
+            print("2. Extend Time [Sub-flow 6b]")
+            act = input("Action: ")
+            
+            if act == '1': # Close
+                target.is_active = False
+                print("> Session Closed."); self.auto_close_sessions() # Trigger absent marking
+            elif act == '2': # Extend
+                mins = int(input("Minutes to extend: "))
+                target.end_dt += datetime.timedelta(minutes=mins)
+                target.end_time = target.end_dt.strftime("%H:%M")
+                print(f"> New End Time: {target.end_time}")
+            input("Press Enter...")
+        except: pass
+
+    def lec_override(self):
+        # [UC-007] Override Attendance
+        print("\n[OVERRIDE ATTENDANCE]")
+        my_s = [s for s in self.db.sessions if s.class_id in self.current_user.assigned_classes]
+        if not my_s: return
+        target = my_s[0] # Demo: Select first session
+        
+        for i, r in enumerate(target.attendance_records): 
+            print(f"{i+1}. {r.student_name} ({r.status})")
+        
+        try:
+             sel = int(input("> Select Student #: ")) - 1
+             r = target.attendance_records[sel]
+             r.status = input("> New Status (Present/Late/Absent): ")
+             r.override_reason = input("> Reason: ")
+             r.is_overridden = True # Set Flag
+             print("> Updated."); input("Press Enter...")
+        except: pass
+
+    def lec_report(self):
+        # [UC-004] View & Export Report
+        print("\n[REPORTS]")
+        for cid in self.current_user.assigned_classes:
+            ss = [s for s in self.db.sessions if s.class_id == cid]
+            print(f"Class {cid}: Total {len(ss)} sessions")
+            
+            # [UC-004 A2] Export CSV Functionality
+            if input("  > Export CSV file? (y/n): ") == 'y':
+                filename = f"Report_{cid}_{int(time.time())}.csv"
+                with open(filename, mode='w', newline='', encoding='utf-8') as file:
+                    writer = csv.writer(file)
+                    writer.writerow(["Date", "Start", "End", "Student", "Status", "Time", "Note"])
+                    for s in ss:
+                        for r in s.attendance_records:
+                            writer.writerow([s.date_str, s.start_time, s.end_time, r.student_name, r.status, r.timestamp, r.override_reason])
+                print(f"  > File saved: {filename}")
+        input("Press Enter...")
+
+    def lec_manual_roll_call(self):
+        print("\n[MANUAL ROLL CALL]")
+        cid = input("> Class ID: ")
+        if cid not in self.current_user.assigned_classes: return
+        cls = next((c for c in self.db.classes if c.class_id == cid), None)
+        
+        now = datetime.datetime.now()
+        sid = f"MAN-{random.randint(100,999)}"
+        sess = Session(sid, cid, now.strftime("%Y-%m-%d"), "Manual", "Manual", "N/A")
+        sess.is_active = False 
+        self.db.sessions.append(sess)
+
+        print(f"> Roll Call for {cid}:")
+        for sid in cls.enrolled_students:
+            sname = self.db.get_student_name(sid)
+            stt = input(f"- {sname} ({sid}) [P=Present/A=Absent/L=Late]: ").upper()
+            final = "Present" if stt=='P' else "Absent" if stt=='A' else "Late"
+            rec = AttendanceRecord(sid, sname, final, now.strftime("%H:%M"), "Manual Entry")
+            sess.attendance_records.append(rec)
+        print("> Saved."); input("Press Enter...")
+
+    # -------------------------------------------------------------------------
+    # ADMIN AREA - FULL CRUD & SOFT DELETE
+    # -------------------------------------------------------------------------
+    def admin_dashboard(self):
+        # [UC-005] Manage Student (CRUD + Soft Delete)
+        while True:
+            self.clear_screen()
+            print("--- ADMIN DASHBOARD ---")
+            print("1. Manage Students (CRUD + Soft Delete)")
+            print("2. Manage Lecturers")
+            print("3. Manage Classes")
+            print("0. Logout")
+            c = input("> Select: ")
+            
+            if c == '1': self.adm_manage_students()
+            elif c == '2': self.adm_manage_lecturers()
+            elif c == '3': self.adm_manage_classes()
+            elif c == '0': self.current_user = None; return
+
+    def adm_manage_students(self):
+        while True:
+            self.clear_screen()
+            print("[MANAGE STUDENTS]")
+            print("1. Add New (Create)")
+            print("2. View List (Read Active)")
+            print("3. Update Info (Update)")
+            print("4. Deactivate (Soft Delete)")
+            print("0. Back")
+            c = input("> Select: ")
+            
+            if c == '1': # Create
+                name = input("Name: ")
+                email = input("Email: ")
+                if any(u.email == email for u in self.db.users): print("Error: Email exists"); continue
+                uid = input("ID: ")
+                if any(u.user_id == uid for u in self.db.users): print("Error: ID exists"); continue
+                
+                cid = input("Class ID: ")
+                s = Student(f"U{len(self.db.users)}", name, email, "123", uid, cid)
+                self.db.users.append(s)
+                
+                # Update class roster
+                cls = next((cl for cl in self.db.classes if cl.class_id == cid), None)
+                if cls: cls.enrolled_students.append(uid)
+                print("Done."); input("Enter...")
+                
+            elif c == '2': # Read Active
+                print(f"\n{'ID':<10} {'Name':<20} {'Status'}")
+                for u in self.db.users:
+                    if isinstance(u, Student):
+                        status = "Active" if u.is_active else "DEACTIVATED"
+                        print(f"{u.student_id:<10} {u.name:<20} {status}")
+                input("Enter...")
+                
+            elif c == '3': # Update
+                tid = input("Enter Student ID: ")
+                target = next((u for u in self.db.users if isinstance(u, Student) and u.student_id == tid), None)
+                if target:
+                    print(f"Editing: {target.name}")
+                    new_n = input(f"New Name ({target.name}): ")
+                    if new_n: target.name = new_n
+                    print("Updated."); input("Enter...")
+                
+            elif c == '4': # Soft Delete
+                tid = input("Enter Student ID to Deactivate: ")
+                target = next((u for u in self.db.users if isinstance(u, Student) and u.student_id == tid), None)
+                if target:
+                    if input(f"Confirm deactivation for {target.name}? (y/n): ") == 'y':
+                        target.is_active = False # SOFT DELETE ACTION
+                        print("> Account Deactivated."); input("Enter...")
+            elif c == '0': return
+
+    def adm_manage_lecturers(self):
+        print("\n[LECTURER LIST]")
+        for u in self.db.users:
+            if isinstance(u, Lecturer):
+                print(f"- {u.lecturer_id} | {u.name} | Active: {u.is_active}")
+        input("Functionality similar to Student Management. Press Enter...")
+
+    def adm_manage_classes(self):
+        while True:
+            self.clear_screen()
+            print("[MANAGE CLASSES]")
+            print("1. Add Class")
+            print("2. View Classes")
+            print("0. Back")
+            c = input("> Select: ")
+            if c == '1':
+                cid = input("Class ID: ")
+                sub = input("Subject: ")
+                lid = input("Lecturer ID: ")
+                self.db.classes.append(ClassRoom(cid, sub, lid))
+                print("Class Created."); input("Enter...")
+            elif c == '2':
+                for cl in self.db.classes:
+                    print(f"- {cl.class_id}: {cl.subject_name}")
+                input("Enter...")
+            elif c == '0': return
+
+if __name__ == "__main__":
+    app = App()
+    app.run()
