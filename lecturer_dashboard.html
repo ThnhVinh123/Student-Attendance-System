@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lecturer Dashboard - Attendance System</title>
+    <style>
+        body { font-family: Arial, sans-serif; background-color: #f4f7f6; margin: 0; padding: 20px; }
+        .container { max-width: 1000px; margin: auto; background: white; padding: 20px; border-radius: 8px; box-shadow: 0 0 10px rgba(0,0,0,0.1); }
+        h2, h3 { color: #333; border-bottom: 2px solid #2563eb; padding-bottom: 5px; }
+        .header { display: flex; justify-content: space-between; align-items: center; }
+        .logout-btn { background: #dc3545; color: white; padding: 8px 15px; text-decoration: none; border-radius: 4px; }
+        
+        /* Form style */
+        .form-box { background: #eef2ff; padding: 20px; border-radius: 8px; margin-bottom: 30px; }
+        .flex-form { display: flex; gap: 10px; align-items: flex-end; flex-wrap: wrap; }
+        .input-group { display: flex; flex-direction: column; }
+        input { padding: 8px; border: 1px solid #ccc; border-radius: 4px; }
+        button { background: #2563eb; color: white; border: none; padding: 9px 20px; border-radius: 4px; cursor: pointer; }
+        button:hover { background: #1d4ed8; }
+
+        /* Table style */
+        table { width: 100%; border-collapse: collapse; margin-top: 15px; }
+        th, td { border: 1px solid #ddd; padding: 12px; text-align: left; }
+        th { background-color: #2563eb; color: white; }
+        tr:nth-child(even) { background-color: #f9f9f9; }
+        
+        .status-active { color: green; font-weight: bold; }
+        .status-closed { color: #777; }
+        .status-present { color: green; font-weight: bold; }
+        .status-late { color: orange; font-weight: bold; }
+        .close-btn { color: #dc3545; text-decoration: none; font-weight: bold; }
+        .flash { padding: 10px; background: #d1e7dd; color: #0f5132; margin-bottom: 20px; border-radius: 4px; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <div class="header">
+        <h2>Lecturer Dashboard</h2>
+        <a href="/logout" class="logout-btn">Logout</a>
+    </div>
+
+    <p>Welcome, <strong>{{ session['name'] }}</strong> (Lecturer ID: {{ session['sid'] }})</p>
+
+    {% with messages = get_flashed_messages() %}
+      {% if messages %}
+        {% for message in messages %}
+          <div class="flash">{{ message }}</div>
+        {% endfor %}
+      {% endif %}
+    {% endwith %}
+
+    <div class="form-box">
+        <h3>Open New Attendance Session</h3>
+        <form action="/lecturer" method="POST" class="flex-form">
+            <div class="input-group">
+                <label>Class ID</label>
+                <input type="text" name="class_id" placeholder="e.g., SE203" required>
+            </div>
+            <div class="input-group">
+                <label>PIN (4 digits)</label>
+                <input type="text" name="pin" placeholder="e.g., 9988" maxlength="4" required>
+            </div>
+            <button type="submit">Open Session</button>
+        </form>
+    </div>
+
+    <h3>Attendance Sessions</h3>
+    <table>
+        <thead>
+            <tr>
+                <th>Session ID</th>
+                <th>Class ID</th>
+                <th>PIN</th>
+                <th>Status</th>
+                <th>Action</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for s in sessions %}
+            <tr>
+                <td>{{ s.session_id }}</td>
+                <td>{{ s.class_id }}</td>
+                <td><strong>{{ s.pin }}</strong></td>
+                <td>
+                    <span class="{{ 'status-active' if s.active else 'status-closed' }}">
+                        {{ 'Active' if s.active else 'Closed' }}
+                    </span>
+                </td>
+                <td>
+                    {% if s.active %}
+                        <a href="/lecturer/close/{{ s.id }}" class="close-btn" onclick="return confirm('Close this session?')">Close Now</a>
+                    {% else %}
+                        N/A
+                    {% endif %}
+                </td>
+            </tr>
+            {% else %}
+            <tr>
+                <td colspan="5" style="text-align:center;">No sessions created yet.</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+
+    <br><br>
+
+    <h3>Live Attendance Logs</h3>
+    <table>
+        <thead>
+            <tr>
+                <th>Student ID</th>
+                <th>Student Name</th>
+                <th>Class</th>
+                <th>Status</th>
+                <th>Check-in Time</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for log in logs %}
+            <tr>
+                <td>{{ log.student_id }}</td>
+                <td>{{ log.student_name }}</td>
+                <td>{{ log.class_id }}</td>
+                <td>
+                    <span class="{{ 'status-present' if log.status == 'Present' else 'status-late' }}">
+                        {{ log.status }}
+                    </span>
+                </td>
+                <td>{{ log.time }}</td>
+            </tr>
+            {% else %}
+            <tr>
+                <td colspan="5" style="text-align:center;">No attendance records found.</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+</body>
+</html>
