@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Admin Master Panel</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+    <div class="container">
+        <h1>Admin Master Data Control</h1>
+        <div class="nav"><a href="/logout" style="color:red;">Logout</a></div>
+
+        <div class="grid-container">
+            <div class="form-box">
+                <h3>1. Manage Courses</h3>
+                <form action="/admin/add_course" method="POST" class="flex-form">
+                    <input type="text" name="code" placeholder="Course Code (SE101)" required>
+                    <input type="text" name="name" placeholder="Course Name" required>
+                    <button type="submit">Add Course</button>
+                </form>
+            </div>
+
+            <div class="form-box">
+                <h3>2. Manage Classes</h3>
+                <form action="/admin/add_class" method="POST" class="flex-form">
+                    <input type="text" name="class_id" placeholder="Class ID (SE101.N01)" required>
+                    <select name="course_code">
+                        {% for c in courses %}<option value="{{ c.course_code }}">{{ c.course_name }}</option>{% endfor %}
+                    </select>
+                    <button type="submit">Create Class</button>
+                </form>
+            </div>
+
+            <div class="form-box">
+                <h3>3. Create User & Assign</h3>
+                <form action="/admin/add_user" method="POST" class="flex-form">
+                    <input type="text" name="uid" placeholder="User ID" required>
+                    <input type="text" name="name" placeholder="Name" required>
+                    <input type="email" name="email" placeholder="Email" required>
+                    <select name="role"><option value="student">Student</option><option value="lecturer">Lecturer</option></select>
+                    <button type="submit">Create</button>
+                </form>
+                <hr>
+                <form action="/admin/assign" method="POST" class="flex-form">
+                    <select name="student_id">
+                        {% for u in users if u.role == 'student' %}<option value="{{ u.user_id }}">{{ u.name }}</option>{% endfor %}
+                    </select>
+                    <select name="class_id">
+                        {% for cl in classrooms %}<option value="{{ cl.class_id }}">{{ cl.class_id }}</option>{% endfor %}
+                    </select>
+                    <button type="submit" style="background: green;">Assign Student</button>
+                </form>
+            </div>
+        </div>
+
+        <table>
+            <tr><th>UserID</th><th>Name</th><th>Role</th><th>Status</th><th>Action</th></tr>
+            {% for u in users %}
+            <tr>
+                <td>{{ u.user_id }}</td>
+                <td>{{ u.name }}</td>
+                <td>{{ u.role }}</td>
+                <td class="{{ 'status-active' if u.status=='Active' else 'status-inactive' }}">{{ u.status }}</td>
+                <td>
+                    <a href="/admin/toggle/{{ u.id }}" class="{{ 'text-red' if u.status=='Active' else 'text-green' }}" 
+                       onclick="return confirm('Confirm? (y/n)')">
+                        {{ 'Soft Delete' if u.status=='Active' else 'Restore' }}
+                    </a>
+                </td>
+            </tr>
+            {% endfor %}
+        </table>
+    </div>
+</body>
+</html>
