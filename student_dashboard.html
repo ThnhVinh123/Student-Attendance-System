@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Student Dashboard</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+    <div class="container">
+        <h1>Student Check-in</h1>
+        <div class="nav">
+            <a href="/student" style="border-bottom: 2px solid var(--primary);">Attendance</a>
+            <a href="/student/history">My History</a>
+            <a href="/logout">Logout</a>
+        </div>
+
+        {% if error %}<div class="msg error">{{ error }}</div>{% endif %}
+        {% if success %}<div class="msg success">{{ success }}</div>{% endif %}
+
+        <div style="max-width: 500px; margin: auto;">
+            <form action="/student/checkin" method="POST">
+                <p style="text-align: center; color: #64748b;">Enter the details provided by your lecturer</p>
+                <input type="text" name="class_id" placeholder="Class ID" required>
+                <input type="text" name="pin" placeholder="4-Digit PIN" required>
+                <button type="submit">Submit Attendance</button>
+            </form>
+        </div>
+    </div>
+</body>
+</html>
