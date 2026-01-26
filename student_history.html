@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Attendance History</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+    <div class="container">
+        <h1>My History</h1>
+        <div class="nav">
+            <a href="/student">Back to Check-in</a>
+            <a href="/logout">Logout</a>
+        </div>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>Class ID</th>
+                    <th>Session ID</th>
+                    <th>Status</th>
+                    <th>Time</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for log in records %}
+                <tr>
+                    <td>{{ log.class_id }}</td>
+                    <td>{{ log.session_id }}</td>
+                    <td class="{{ 'status-active' if log.status == 'Present' else 'status-inactive' }}">
+                        {{ log.status }}
+                    </td>
+                    <td>{{ log.time }}</td>
+                </tr>
+                {% else %}
+                <tr>
+                    <td colspan="4" style="text-align: center;">No history available.</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</body>
+</html>
