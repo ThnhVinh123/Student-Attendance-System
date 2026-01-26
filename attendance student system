@@ -1,402 +1,191 @@
-import datetime
-import random
+from flask import Flask, render_template, request, redirect, url_for, session, flash
+from flask_sqlalchemy import SQLAlchemy
+from datetime import datetime
 import os
-import time
-import csv
+
+app = Flask(__name__)
+app.secret_key = "attendance_secret_key"
+
+basedir = os.path.abspath(os.path.dirname(__file__))
+app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///' + os.path.join(basedir, 'attendance.db')
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+db = SQLAlchemy(app)
 
 # =============================================================================
-# 1. ENTITY CLASSES (DATA MODELS) - KHỚP CLASS DIAGRAM
+# DATABASE MODELS
 # =============================================================================
 
-class User:
-    def __init__(self, user_id, name, email, password, role):
-        self.user_id = user_id
-        self.name = name
-        self.email = email
-        self.password = password
-        self.role = role
-        self.is_active = True 
-        self.failed_login_attempts = 0 
-        self.locked_until = None 
+class User(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.String(20), unique=True, nullable=False)
+    email = db.Column(db.String(100), unique=True, nullable=False)
+    password = db.Column(db.String(100), nullable=False)
+    role = db.Column(db.String(20), nullable=False) # admin, lecturer, student
+    name = db.Column(db.String(100), nullable=False)
+    status = db.Column(db.String(20), default='Active')
+    fail_count = db.Column(db.Integer, default=0)
+    last_fail_date = db.Column(db.String(20), default="") 
 
-class Student(User):
-    def __init__(self, user_id, name, email, password, student_id, class_id):
-        super().__init__(user_id, name, email, password, "Student")
-        self.student_id = student_id
-        self.class_id = class_id
+class Course(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    course_code = db.Column(db.String(20), unique=True)
+    course_name = db.Column(db.String(100))
 
-class Lecturer(User):
-    def __init__(self, user_id, name, email, password, lecturer_id):
-        super().__init__(user_id, name, email, password, "Lecturer")
-        self.lecturer_id = lecturer_id
-        self.assigned_classes = []
+class ClassRoom(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    class_id = db.Column(db.String(20), unique=True)
+    course_code = db.Column(db.String(20)) # Liên kết với Course.course_code
 
-class Admin(User):
-    def __init__(self, user_id, name, email, password):
-        super().__init__(user_id, name, email, password, "Admin")
+class Enrollment(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    student_id = db.Column(db.String(20))
+    class_id = db.Column(db.String(20))
 
-# [NEW] Course Class (Môn học)
-class Course:
-    def __init__(self, course_id, course_name, credits, lecturer_id=""):
-        self.course_id = course_id
-        self.course_name = course_name
-        self.credits = credits
-        self.lecturer_id = lecturer_id 
+class AttendanceSession(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    session_id = db.Column(db.String(20), unique=True)
+    class_id = db.Column(db.String(20))
+    pin = db.Column(db.String(10))
+    start_time = db.Column(db.DateTime, default=datetime.now)
+    active = db.Column(db.Boolean, default=True)
 
-# [UPDATED] ClassRoom liên kết với Course
-class ClassRoom:
-    def __init__(self, class_id, course_id, lecturer_id):
-        self.class_id = class_id
-        self.course_id = course_id # Foreign Key -> Course
-        self.lecturer_id = lecturer_id 
-        self.enrolled_students = [] 
+class AttendanceLog(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    student_id = db.Column(db.String(20))
+    student_name = db.Column(db.String(100))
+    class_id = db.Column(db.String(20))
+    session_id = db.Column(db.String(20))
+    status = db.Column(db.String(20)) 
+    time = db.Column(db.String(20))
 
-class Session:
-    def __init__(self, session_id, class_id, date_str, start_time, end_time, room):
-        self.session_id = session_id
-        self.class_id = class_id
-        self.date_str = date_str
-        self.start_time = start_time
-        self.end_time = end_time
-        self.room = room
-        self.pin_code = str(random.randint(100000, 999999))
-        self.is_active = True
-        self.attendance_records = []
-        
-        try:
-            self.start_dt = datetime.datetime.strptime(f"{date_str} {start_time}", "%Y-%m-%d %H:%M")
-            self.end_dt = datetime.datetime.strptime(f"{date_str} {end_time}", "%Y-%m-%d %H:%M")
-        except ValueError:
-            now = datetime.datetime.now()
-            self.start_dt = now
-            self.end_dt = now + datetime.timedelta(minutes=90)
-
-class AttendanceRecord:
-    def __init__(self, student_id, student_name, status, timestamp, override_reason=""):
-        self.student_id = student_id
-        self.student_name = student_name
-        self.status = status 
-        self.timestamp = timestamp
-        self.override_reason = override_reason
-        self.is_overridden = False
+# Khởi tạo dữ liệu ban đầu
+with app.app_context():
+    db.create_all()
+    if not User.query.filter_by(email="admin@gmail.com").first():
+        db.session.add(User(user_id="U001", email="admin@gmail.com", password="123", role="admin", name="System Admin"))
+        db.session.add(Course(course_code="SE200", course_name="Software Engineering"))
+        db.session.add(ClassRoom(class_id="SE200.M11", course_code="SE200"))
+        db.session.commit()
 
 # =============================================================================
-# 2. MOCK DATABASE
+# AUTHENTICATION (Reset theo ngày)
 # =============================================================================
 
-class Database:
-    def __init__(self):
-        self.users = []
-        self.courses = [] # List chứa các Course
-        self.classes = []
-        self.sessions = []
-        self._seed_data()
+@app.route("/")
+def index():
+    return render_template("index.html")
 
-    def _seed_data(self):
-        # 1. Admin
-        self.users.append(Admin("U00", "System Admin", "admin@uth.edu.vn", "123"))
-        
-        # 2. Lecturer
-        lec = Lecturer("U01", "Tran Thi My Tien", "tien@uth.edu.vn", "123", "GV01")
-        lec.assigned_classes = ["SE101", "NT102"]
-        self.users.append(lec)
+@app.route("/login", methods=["POST"])
+def login():
+    email = request.form.get("email")
+    password = request.form.get("password")
+    today = datetime.now().strftime("%Y-%m-%d")
+    user = User.query.filter_by(email=email).first()
 
-        # 3. Courses (Môn học)
-        c1 = Course("CNPM", "Software Engineering", 3, "GV01")
-        c2 = Course("MMT", "Computer Networks", 3, "GV01")
-        self.courses.extend([c1, c2])
+    if user:
+        if user.last_fail_date != today:
+            user.fail_count = 0
+            if user.status == "Inactive": user.status = "Active"
+            db.session.commit()
 
-        # 4. Classes (Lớp học phần - Liên kết với Môn học)
-        cls1 = ClassRoom("SE101", "CNPM", "GV01") 
-        cls1.enrolled_students = ["SV01", "SV02"]
-        
-        cls2 = ClassRoom("NT102", "MMT", "GV01")
-        cls2.enrolled_students = ["SV01"]
-        
-        self.classes.extend([cls1, cls2])
+        if user.status == "Inactive":
+            return render_template("index.html", error="Locked! Try again tomorrow.")
 
-        # 5. Students
-        s1 = Student("U02", "Nguyen Tuan Nghia", "nghia@st.uth.edu.vn", "123", "SV01", "SE101")
-        s2 = Student("U03", "Duong Ba Truong", "truong@st.uth.edu.vn", "123", "SV02", "SE101")
-        self.users.extend([s1, s2])
-
-    def get_student_name(self, student_id):
-        for u in self.users:
-            if isinstance(u, Student) and u.student_id == student_id:
-                return u.name
-        return "Unknown"
-
-    def get_course_name_by_id(self, course_id):
-        for c in self.courses:
-            if c.course_id == course_id:
-                return c.course_name
-        return "Unknown Course"
-
-# =============================================================================
-# 3. APP CONTROLLER
-# =============================================================================
-
-class App:
-    def __init__(self):
-        self.db = Database()
-        self.current_user = None
-
-    def clear_screen(self):
-        print("\n" * 2)
-
-    def auto_close_sessions(self):
-        now = datetime.datetime.now()
-        for session in self.db.sessions:
-            if session.is_active and now > session.end_dt:
-                session.is_active = False 
-                cls_info = next((c for c in self.db.classes if c.class_id == session.class_id), None)
-                if not cls_info: continue
-                submitted_ids = [r.student_id for r in session.attendance_records]
-                for sid in cls_info.enrolled_students:
-                    if sid not in submitted_ids:
-                        absent_rec = AttendanceRecord(sid, self.db.get_student_name(sid), "Absent", "--", "Auto-marked")
-                        session.attendance_records.append(absent_rec)
-
-    def run(self):
-        while True:
-            self.auto_close_sessions()
-            self.clear_screen()
-            print("==================================================")
-            print("       STUDENT ATTENDANCE SYSTEM (UTH)")
-            print("==================================================")
-            if not self.current_user:
-                print("1. Login")
-                print("0. Exit")
-                choice = input("> Enter choice: ")
-                if choice == '1': self.login_screen()
-                elif choice == '0': break
-            else:
-                self.route_dashboard()
-
-    def login_screen(self):
-        print("\n--- LOGIN ---")
-        email = input("Email: ")
-        user = next((u for u in self.db.users if u.email == email), None)
-        if user and not user.is_active:
-            print("> ERROR: Account deactivated."); input("Enter..."); return
-        if user and user.locked_until and datetime.datetime.now() < user.locked_until:
-            print(f"> LOCKED until {user.locked_until.strftime('%H:%M')}"); input("Enter..."); return
-
-        password = input("Password: ")
-        if user and user.password == password:
-            user.failed_login_attempts = 0
-            self.current_user = user
-            print(f"\n> Welcome {user.name} ({user.role})")
-            input("Enter...")
+        if user.password == password:
+            user.fail_count = 0
+            db.session.commit()
+            session.update({"user": user.email, "role": user.role, "name": user.name, "sid": user.user_id})
+            return redirect(url_for(f"{user.role}_dashboard"))
         else:
-            if user:
-                user.failed_login_attempts += 1
-                print(f"> Incorrect Password ({user.failed_login_attempts}/5)")
-                if user.failed_login_attempts >= 5:
-                    user.locked_until = datetime.datetime.now() + datetime.timedelta(minutes=15)
-            else: print("> Invalid credentials.")
-            input("Enter...")
+            user.fail_count += 1
+            user.last_fail_date = today
+            if user.fail_count >= 5: user.status = "Inactive"
+            db.session.commit()
+            return render_template("index.html", error=f"Wrong password {user.fail_count}/5")
 
-    def route_dashboard(self):
-        if self.current_user.role == "Student": self.student_dashboard()
-        elif self.current_user.role == "Lecturer": self.lecturer_dashboard()
-        elif self.current_user.role == "Admin": self.admin_dashboard()
+    return render_template("index.html", error="User not found!")
 
-    # --- STUDENT ---
-    def student_dashboard(self):
-        while True:
-            self.auto_close_sessions()
-            self.clear_screen()
-            print(f"--- STUDENT: {self.current_user.name} ---")
-            print("1. Submit Attendance")
-            print("2. View History")
-            print("0. Logout")
-            c = input("> Select: ")
-            if c == '1': self.st_submit_attendance()
-            elif c == '2': self.st_view_history()
-            elif c == '0': self.current_user = None; return
+@app.route("/logout")
+def logout():
+    session.clear()
+    return redirect(url_for("index"))
 
-    def st_submit_attendance(self):
-        print("\n[AVAILABLE SESSIONS]")
-        my_sessions = [s for s in self.db.sessions if s.class_id == self.current_user.class_id and s.is_active]
-        if not my_sessions: print("> No active sessions."); input("Enter..."); return
+# =============================================================================
+# ADMIN ROUTES
+# =============================================================================
 
-        for idx, s in enumerate(my_sessions):
-            print(f"{idx+1}. {s.class_id} | {s.date_str} {s.start_time}-{s.end_time}")
+@app.route("/admin")
+def admin_dashboard():
+    if session.get("role") != "admin": return redirect(url_for("index"))
+    return render_template("admin_dashboard.html", 
+                           users=User.query.all(), 
+                           courses=Course.query.all(),
+                           classrooms=ClassRoom.query.all())
 
-        try:
-            sel = int(input("\n> Select Session #: ")) - 1
-            if sel < 0 or sel >= len(my_sessions): return
-            sess = my_sessions[sel]
-            
-            pin = input("> Enter PIN: ")
-            if pin == sess.pin_code:
-                status = "Late" if datetime.datetime.now() > sess.start_dt + datetime.timedelta(minutes=15) else "Present"
-                if any(r.student_id == self.current_user.student_id for r in sess.attendance_records):
-                    print("> Already submitted."); input("Enter..."); return
-                
-                sess.attendance_records.append(AttendanceRecord(self.current_user.student_id, self.current_user.name, status, datetime.datetime.now().strftime("%H:%M:%S")))
-                print(f"> Success! Status: {status}"); input("Enter...")
-            else:
-                print("> Invalid PIN."); input("Enter...")
-        except: pass
+@app.route("/admin/add_user", methods=["POST"])
+def add_user():
+    db.session.add(User(user_id=request.form.get("uid"), email=request.form.get("email"),
+                        name=request.form.get("name"), role=request.form.get("role"), password="123"))
+    db.session.commit()
+    return redirect(url_for("admin_dashboard"))
 
-    def st_view_history(self):
-        print("\n[HISTORY]")
-        print(f"{'Date':<12} {'Class':<8} {'Status'}")
-        for s in self.db.sessions:
-            for r in s.attendance_records:
-                if r.student_id == self.current_user.student_id:
-                    print(f"{s.date_str:<12} {s.class_id:<8} {r.status}")
-        input("Enter...")
+@app.route("/admin/add_course", methods=["POST"])
+def add_course():
+    db.session.add(Course(course_code=request.form.get("code"), course_name=request.form.get("name")))
+    db.session.commit()
+    return redirect(url_for("admin_dashboard"))
 
-    # --- LECTURER ---
-    def lecturer_dashboard(self):
-        while True:
-            self.auto_close_sessions()
-            self.clear_screen()
-            print(f"--- LECTURER: {self.current_user.name} ---")
-            print("1. Create Session")
-            print("2. Manage Session")
-            print("3. Report")
-            print("0. Logout")
-            c = input("> Select: ")
-            if c == '1': self.lec_create_session()
-            elif c == '2': self.lec_manage_session()
-            elif c == '3': self.lec_report()
-            elif c == '0': self.current_user = None; return
+@app.route("/admin/add_class", methods=["POST"])
+def add_class():
+    db.session.add(ClassRoom(class_id=request.form.get("class_id"), course_code=request.form.get("course_code")))
+    db.session.commit()
+    return redirect(url_for("admin_dashboard"))
 
-    def lec_create_session(self):
-        print("\n[CREATE SESSION]")
-        for c in self.current_user.assigned_classes: 
-            # Hiển thị Tên môn học kế bên Mã lớp để GV dễ chọn
-            cls = next((cl for cl in self.db.classes if cl.class_id == c), None)
-            course_name = self.db.get_course_name_by_id(cls.course_id) if cls else "Unknown"
-            print(f"- {c} ({course_name})")
-            
-        cid = input("> Class ID: ")
-        if cid not in self.current_user.assigned_classes: return
+@app.route("/admin/assign", methods=["POST"])
+def assign_student():
+    db.session.add(Enrollment(student_id=request.form.get("student_id"), class_id=request.form.get("class_id")))
+    db.session.commit()
+    return redirect(url_for("admin_dashboard"))
 
-        date_in = input("Date (YYYY-MM-DD): ")
-        start_in = input("Start (HH:MM): ")
-        end_in = input("End (HH:MM): ")
-        
-        sid = f"S{random.randint(1000,9999)}"
-        s = Session(sid, cid, date_in, start_in, end_in, "Room 101")
-        self.db.sessions.append(s)
-        print(f"> Created! PIN: {s.pin_code}"); input("Enter...")
+@app.route("/admin/toggle/<int:id>")
+def toggle_user(id):
+    u = User.query.get(id)
+    u.status = "Inactive" if u.status == "Active" else "Active"
+    db.session.commit()
+    return redirect(url_for("admin_dashboard"))
 
-    def lec_manage_session(self):
-        print("\n[MANAGE]")
-        my_s = [s for s in self.db.sessions if s.class_id in self.current_user.assigned_classes]
-        for i, s in enumerate(my_s):
-            print(f"{i+1}. {s.class_id} | {s.date_str} | Active: {s.is_active}")
-        input("Enter to back...")
+# =============================================================================
+# LECTURER & STUDENT 
+# =============================================================================
 
-    def lec_report(self):
-        print("\n[REPORT]")
-        for cid in self.current_user.assigned_classes:
-            ss = [s for s in self.db.sessions if s.class_id == cid]
-            print(f"Class {cid}: {len(ss)} sessions")
-        input("Enter...")
+@app.route("/lecturer", methods=["GET", "POST"])
+def lecturer_dashboard():
+    if session.get("role") != "lecturer": return redirect(url_for("index"))
+    if request.method == "POST":
+        s_id = f"SS{AttendanceSession.query.count() + 1:03}"
+        db.session.add(AttendanceSession(session_id=s_id, class_id=request.form.get("class_id"), pin=request.form.get("pin")))
+        db.session.commit()
+    return render_template("lecturer_dashboard.html", sessions=AttendanceSession.query.all(), logs=AttendanceLog.query.all())
 
-    # --- ADMIN (MENU TÁCH BIỆT ĐỂ KHỚP USE CASE) ---
-    def admin_dashboard(self):
-        while True:
-            self.clear_screen()
-            print("--- ADMIN DASHBOARD ---")
-            print("1. Manage Students")
-            print("2. Manage Lecturers")
-            print("3. Manage Classes")  # Use Case: Manage Classes
-            print("4. Manage Courses")  # Use Case: Manage Course
-            print("0. Logout")
-            c = input("> Select: ")
-            
-            if c == '1': self.adm_manage_students()
-            elif c == '2': self.adm_manage_lecturers()
-            elif c == '3': self.adm_manage_classes()
-            elif c == '4': self.adm_manage_courses()
-            elif c == '0': self.current_user = None; return
+@app.route("/student")
+def student_dashboard():
+    if session.get("role") != "student": return redirect(url_for("index"))
+    return render_template("student_dashboard.html")
 
-    def adm_manage_students(self):
-        print("\n[MANAGE STUDENTS]")
-        print("1. Add Student\n2. View Students\n0. Back")
-        if input("> ") == '1':
-            name = input("Name: ")
-            sid = input("ID: ")
-            cid = input("Class ID: ")
-            self.db.users.append(Student(f"U{len(self.db.users)}", name, f"{sid}@st.uth.edu.vn", "123", sid, cid))
-            print("Added.")
-        elif input("> ") == '2': 
-             for u in self.db.users: 
-                 if isinstance(u, Student): print(f"- {u.name} ({u.student_id})")
-        input("Enter...")
+@app.route("/student/checkin", methods=["POST"])
+def student_checkin():
+    cid, pin = request.form.get("class_id"), request.form.get("pin")
+    enrolled = Enrollment.query.filter_by(student_id=session['sid'], class_id=cid).first()
+    if not enrolled: return render_template("student_dashboard.html", error="Not enrolled in this class!")
+    
+    s = AttendanceSession.query.filter_by(class_id=cid, active=True).first()
+    if not s or s.pin != pin: return render_template("student_dashboard.html", error="Invalid Session/PIN")
 
-    def adm_manage_lecturers(self):
-        print("Feature available in full version."); input("Enter...")
-
-    # [USE CASE: Manage Classes]
-    def adm_manage_classes(self):
-        while True:
-            self.clear_screen()
-            print("[MANAGE CLASSES]")
-            print("1. Add New Class")
-            print("2. List All Classes")
-            print("0. Back")
-            c = input("> Select: ")
-            
-            if c == '1':
-                # Phải chọn Course ID khi tạo lớp (Logic Class Diagram)
-                print("Available Courses:")
-                for co in self.db.courses: print(f"- {co.course_id}: {co.course_name}")
-                
-                cid = input("New Class ID (e.g., SE101): ")
-                course_id = input("Link to Course ID (e.g., CNPM): ")
-                
-                # Validation: Course phải tồn tại
-                if not any(co.course_id == course_id for co in self.db.courses):
-                    print("> Error: Course ID not found. Create course first."); input("Enter..."); continue
-
-                lid = input("Lecturer ID: ")
-                self.db.classes.append(ClassRoom(cid, course_id, lid))
-                
-                # Cập nhật lớp cho giảng viên
-                lec = next((u for u in self.db.users if isinstance(u, Lecturer) and u.lecturer_id == lid), None)
-                if lec: lec.assigned_classes.append(cid)
-                
-                print("> Class Created!"); input("Enter...")
-            elif c == '2':
-                for cl in self.db.classes:
-                    c_name = self.db.get_course_name_by_id(cl.course_id)
-                    print(f"- {cl.class_id}: {c_name} (Lecturer: {cl.lecturer_id})")
-                input("Enter...")
-            elif c == '0': return
-
-    # [USE CASE: Manage Course]
-    def adm_manage_courses(self):
-        while True:
-            self.clear_screen()
-            print("[MANAGE COURSES]")
-            print("1. Add New Course")
-            print("2. List All Courses")
-            print("0. Back")
-            c = input("> Select: ")
-            if c == '1':
-                cid = input("Course ID (e.g., DSA): ")
-                cname = input("Course Name: ")
-                cred = input("Credits: ")
-                lid = input("Coordinator ID: ")
-                
-                new_course = Course(cid, cname, cred, lid)
-                self.db.courses.append(new_course)
-                print("> Course Added!"); input("Enter...")
-            elif c == '2':
-                print(f"\n{'ID':<10} {'Name':<25} {'Credits'}")
-                for co in self.db.courses:
-                    print(f"{co.course_id:<10} {co.course_name:<25} {co.credits}")
-                input("Enter...")
-            elif c == '0': return
+    status = "Late" if (datetime.now() - s.start_time).total_seconds() / 60 > 15 else "Present"
+    db.session.add(AttendanceLog(student_id=session['sid'], student_name=session['name'], class_id=cid, 
+                                 session_id=s.session_id, status=status, time=datetime.now().strftime("%H:%M:%S")))
+    db.session.commit()
+    return render_template("student_dashboard.html", success=f"Status: {status}")
 
 if __name__ == "__main__":
-    app = App()
-    app.run()
+    app.run(debug=True)
